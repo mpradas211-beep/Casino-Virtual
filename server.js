@@ -18,13 +18,16 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 // ---------- "Base de datos" en memoria ----------
-const users = new Map(); // email -> { id, email, passwordHash, salt, balance }
+const users = new Map(); // email -> { id, email, passwordHash, salt, balance, isAdmin }
 const tokens = new Map(); // token -> email
 
 // Usuario de prueba ya cargado para poder entrar sin registrarse
-seedUser('demo@casino.com', 'demo1234', 500);
+seedUser('demo@casino.com', 'demo1234', 500, false);
 
-function seedUser(email, password, balance) {
+// Cuenta de administrador — cambiá esta contraseña antes de compartir el link
+seedUser('admin@casino.com', 'admin1234', 0, true);
+
+function seedUser(email, password, balance, isAdmin) {
   const { salt, hash } = hashPassword(password);
   users.set(email, {
     id: crypto.randomUUID(),
@@ -32,6 +35,7 @@ function seedUser(email, password, balance) {
     passwordHash: hash,
     salt,
     balance,
+    isAdmin: !!isAdmin,
   });
 }
 
@@ -127,7 +131,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: 'Ese email ya está registrado' });
       }
       const { salt, hash } = hashPassword(password);
-      users.set(email, { id: crypto.randomUUID(), email, passwordHash: hash, salt, balance: 500 });
+      users.set(email, { id: crypto.randomUUID(), email, passwordHash: hash, salt, balance: 500, isAdmin: false });
       return sendJson(res, 201, { ok: true });
     }
 
@@ -145,6 +149,21 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/saldo' && req.method === 'GET') {
       const user = getUserFromRequest(req);
       if (!user) return sendJson(res, 401, { error: 'No autenticado' });
+      return sendJson(res, 200, { balance: user.balance });
+    }
+
+    // Carga de saldo DEMO (dinero ficticio, no procesa pagos reales)
+    if (url.pathname === '/api/cargar' && req.method === 'POST') {
+      const user = getUserFromRequest(req);
+      if (!user) return sendJson(res, 401, { error: 'No autenticado' });
+
+      const { amount } = await readBody(req);
+      const amountNum = Number(amount);
+      if (!amountNum || amountNum <= 0 || amountNum > 10000) {
+        return sendJson(res, 400, { error: 'Monto inválido (máximo $10.000 por carga en la demo)' });
+      }
+
+      user.balance += amountNum;
       return sendJson(res, 200, { balance: user.balance });
     }
 
@@ -169,7 +188,34 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { reels, stake: amount, payout, balance: user.balance });
     }
 
-    // ----- Archivos estáticos (frontend) -----
+    // ----- Administrador -----
+    if (url.pathname === '/api/admin/usuarios' && req.method === 'GET') {
+      const admin = getUserFromRequest(req);
+      if (!admin || !admin.isAdmin) return sendJson(res, 403, { error: 'Acceso solo para administradores' });
+
+      const lista = Array.from(users.values()).map((u) => ({
+        email: u.email,
+        balance: u.balance,
+        isAdmin: u.isAdmin,
+      }));
+      return sendJson(res, 200, { usuarios: lista });
+    }
+
+    if (url.pathname === '/api/admin/cargar' && req.method === 'POST') {
+      const admin = getUserFromRequest(req);
+      if (!admin || !admin.isAdmin) return sendJson(res, 403, { error: 'Acceso solo para administradores' });
+
+      const { email, amount } = await readBody(req);
+      const target = users.get(email);
+      const amountNum = Number(amount);
+      if (!target) return sendJson(res, 404, { error: 'No existe una cuenta con ese email' });
+      if (!amountNum || amountNum === 0) return sendJson(res, 400, { error: 'Monto inválido' });
+
+      target.balance += amountNum;
+      return sendJson(res, 200, { email: target.email, balance: target.balance });
+    }
+
+
     let filePath = url.pathname === '/' ? '/login.html' : url.pathname;
     filePath = path.join(PUBLIC_DIR, filePath);
     if (!filePath.startsWith(PUBLIC_DIR)) {
